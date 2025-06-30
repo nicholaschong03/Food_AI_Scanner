@@ -81,6 +81,54 @@ segmentation_model = None
 food_labels = None
 gemini_model = None
 
+# Lazy loading functions
+def load_food_nonfood_model():
+    """Lazy load food/non-food classifier"""
+    global food_nonfood_model
+    if food_nonfood_model is None:
+        logger.info("Loading food/non-food classifier...")
+        optimize_memory()
+        food_nonfood_model = keras.models.load_model('models/food_nonfood_mnv2.h5', compile=False)
+        optimize_memory()
+    return food_nonfood_model
+
+def load_food_classifier_model():
+    """Lazy load food dish classifier"""
+    global food_classifier_model
+    if food_classifier_model is None:
+        logger.info("Loading food dish classifier...")
+        optimize_memory()
+        food_classifier_model = keras.models.load_model('models/food_dish_classifier_efficientnetb2_combined_latest.h5', compile=False)
+        optimize_memory()
+    return food_classifier_model
+
+def load_segmentation_model():
+    """Lazy load YOLO segmentation model"""
+    global segmentation_model
+    if segmentation_model is None:
+        logger.info("Loading YOLO segmentation model...")
+        optimize_memory()
+        segmentation_model = YOLO('models/best_ingredient_seg.pt')
+        optimize_memory()
+    return segmentation_model
+
+def load_food_labels():
+    """Lazy load food labels"""
+    global food_labels
+    if food_labels is None:
+        logger.info("Loading food labels...")
+        with open('models/labels_combined.json', 'r') as f:
+            food_labels = json.load(f)
+    return food_labels
+
+def load_gemini_model():
+    """Lazy load Gemini model"""
+    global gemini_model
+    if gemini_model is None:
+        logger.info("Setting up Gemini API...")
+        setup_gemini()
+    return gemini_model
+
 # Nutritionix API configuration
 def setup_nutritionix():
     """Setup Nutritionix API if credentials are available"""
@@ -495,172 +543,19 @@ def process_yolo_segmentation(image: Image.Image, results, confidence_threshold:
         # Return empty results if processing fails
         return image, ["segmentation_failed"], []
 
-def load_models():
-    """Load all ML models with memory optimization"""
-    global food_nonfood_model, food_classifier_model, segmentation_model, food_labels
-
-    try:
-        # Optimize memory before loading
-        optimize_memory()
-
-        # Load food/non-food classifier
-        logger.info("Loading food/non-food classifier...")
-        food_nonfood_model = keras.models.load_model('models/food_nonfood_mnv2.h5', compile=False)
-
-        # Load food dish classifier
-        logger.info("Loading food dish classifier...")
-        food_classifier_model = keras.models.load_model('models/food_dish_classifier_efficientnetb2_combined_latest.h5', compile=False)
-
-        # Load YOLO segmentation model
-        logger.info("Loading YOLO segmentation model...")
-        segmentation_model = YOLO('models/best_ingredient_seg.pt')
-
-        # Load food labels
-        logger.info("Loading food labels...")
-        with open('models/labels_combined.json', 'r') as f:
-            food_labels = json.load(f)
-
-        # Setup Gemini API
-        logger.info("Setting up Gemini API...")
-        setup_gemini()
-
-        logger.info("All models loaded successfully!")
-
-        # Optimize memory after loading
-        optimize_memory()
-
-    except Exception as e:
-        logger.error(f"Error loading models: {str(e)}")
-        raise e
-
-# Load models on startup
-@app.on_event("startup")
-async def startup_event():
-    load_models()
-    setup_nutritionix()
-
-# Pydantic models for responses
-class FoodDetectionResponse(BaseModel):
-    is_food: bool
-    confidence: float
-
-class FoodClassificationResponse(BaseModel):
-    dish_name: str
-    confidence: Optional[float]
-    top_predictions: List[Dict[str, Any]]
-
-class SegmentationResponse(BaseModel):
-    ingredients_detected: List[str]
-    ingredient_confidences: List[Dict[str, float]]  # List of {ingredient: confidence} pairs
-    combined_analysis: Optional[Dict[str, Any]] = None  # Combined YOLO + Gemini results
-    nutrition_data: Optional[Dict[str, Any]] = None  # Nutrition information for ingredients
-    health_analysis: Optional[Dict[str, Any]] = None  # Health metrics and recommendations
-
-class CombinedResponse(BaseModel):
-    food_detection: FoodDetectionResponse
-    food_classification: Optional[FoodClassificationResponse]
-    segmentation: Optional[SegmentationResponse]
-
-class ChatRequest(BaseModel):
-    question: str
-    dish_name: Optional[str] = None
-    ingredients: Optional[List[str]] = None
-    nutrition: Optional[Dict[str, Any]] = None
-    image: Optional[str] = None  # base64-encoded image
-
-class ChatResponse(BaseModel):
-    answer: str
-    gemini_raw: Optional[dict] = None
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    try:
-        # Check if models are loaded
-        models_loaded = all([
-            food_nonfood_model is not None,
-            food_classifier_model is not None,
-            segmentation_model is not None,
-            food_labels is not None
-        ])
-
-        # Check Nutritionix configuration
-        nutritionix_configured = setup_nutritionix()
-
-        # Check Gemini configuration
-        gemini_configured = gemini_model is not None
-
-        return {
-            "status": "healthy" if models_loaded else "unhealthy",
-            "models_loaded": models_loaded,
-            "nutritionix_configured": nutritionix_configured,
-            "gemini_configured": gemini_configured,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-
-# Food detection endpoint
-@app.post("/detect-food", response_model=FoodDetectionResponse)
-async def detect_food(file: UploadFile = File(...)):
-    """Detect if the uploaded image contains food"""
-    try:
-        # Read and validate image
-        if not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
-
-        # Check file size
-        image_data = await file.read()
-        if len(image_data) > config['max_image_size']:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File too large. Maximum size is {config['max_image_size']} bytes"
-            )
-
-        image = Image.open(io.BytesIO(image_data)).convert('RGB')
-
-        # Preprocess image using the same logic as Google Colab
-        processed_image = preprocess_image_for_detection(image)
-
-        # Make prediction (same as Colab: model.predict(x, verbose=0)[0][0])
-        prob = food_nonfood_model.predict(processed_image, verbose=0)[0][0]
-
-        # Apply threshold logic (same as Colab: prob < threshold for FOOD)
-        threshold = config['classification_threshold']
-        is_food = prob < threshold  # If prob < threshold, it's FOOD
-
-        # Calculate confidence (same as Colab logic)
-        confidence = prob if not is_food else (1 - prob)
-
-        # Optimize memory after prediction
-        optimize_memory()
-
-        return FoodDetectionResponse(
-            is_food=is_food,
-            confidence=confidence
-        )
-
-    except Exception as e:
-        logger.error(f"Error in food detection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
-
 def classify_food_dish(image: Image.Image):
     """Classify the food dish using the loaded model and return a FoodClassificationResponse."""
     processed_image = preprocess_image_for_food_classification(image)
-    predictions = food_classifier_model.predict(processed_image, verbose=0)[0]
+    model = load_food_classifier_model()
+    labels = load_food_labels()
+    predictions = model.predict(processed_image, verbose=0)[0]
     top_indices = np.argsort(predictions)[-3:][::-1]
     top_predictions = [
-        {"dish_name": food_labels[idx], "confidence": float(predictions[idx])}
+        {"dish_name": labels[idx], "confidence": float(predictions[idx])}
         for idx in top_indices
     ]
     best_idx = top_indices[0]
-    dish_name = food_labels[best_idx]
+    dish_name = labels[best_idx]
     confidence = float(predictions[best_idx])
     return FoodClassificationResponse(
         dish_name=dish_name,
@@ -673,7 +568,8 @@ def gemini_confidence_to_float(conf):
     return mapping.get(str(conf).lower(), 0.0)
 
 def classify_dish_with_gemini(image: Image.Image) -> dict:
-    if not gemini_model:
+    model = load_gemini_model()
+    if not model:
         return {"dish_name": "unknown", "confidence": "low", "source": "gemini_disabled"}
     try:
         prompt = """
@@ -690,274 +586,271 @@ def classify_dish_with_gemini(image: Image.Image) -> dict:
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='PNG')
         img_byte_arr = img_byte_arr.getvalue()
-        response = gemini_model.generate_content([prompt, {"mime_type": "image/png", "data": img_byte_arr}])
+        response = model.generate_content([prompt, {"mime_type": "image/png", "data": img_byte_arr}])
         response_text = response.text
         if '```json' in response_text:
             json_start = response_text.find('```json') + 7
             json_end = response_text.find('```', json_start)
             json_str = response_text[json_start:json_end].strip()
+        elif '```' in response_text:
+            json_start = response_text.find('```') + 3
+            json_end = response_text.find('```', json_start)
+            json_str = response_text[json_start:json_end].strip()
         else:
-            json_str = response_text
+            json_str = response_text.strip()
+
         result = json.loads(json_str)
         result["source"] = "gemini"
         return result
     except Exception as e:
-        logger.error(f"Error with Gemini API: {str(e)}")
-        return {"dish_name": "unknown", "confidence": "low", "source": "gemini_error"}
+        logger.error(f"Error in Gemini classification: {str(e)}")
+        return {"dish_name": "unknown", "confidence": "low", "source": "gemini_error", "error": str(e)}
 
 @app.post("/classify-food", response_model=FoodClassificationResponse)
 async def classify_food(file: UploadFile = File(...)):
-    """Classify the food dish, fallback to Gemini Vision Pro if confidence is low"""
+    """Classify the food dish in the uploaded image"""
     try:
+        # Read and validate image
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
+
+        # Check file size
         image_data = await file.read()
-        image = Image.open(io.BytesIO(image_data))
-        result = classify_food_dish(image)
-        used_model = "local"
-        gemini_result = None
-        # If confidence is below threshold, use Gemini for dish name
-        if result.confidence < FOOD_CLASSIFICATION_CONFIDENCE_THRESHOLD and gemini_model:
-            try:
-                gemini_result = classify_dish_with_gemini(image)
-                used_model = "gemini"
-                return {
-                    "dish_name": gemini_result.get("dish_name", "unknown"),
-                    "confidence": gemini_confidence_to_float(gemini_result.get("confidence")),
-                    "top_predictions": [],
-                    "used_model": used_model,
-                    "gemini_result": gemini_result
-                }
-            except Exception as e:
-                logger.warning(f"Gemini dish classification failed: {str(e)}")
-        # Return local model result
-        return {
-            **result.dict(),
-            "used_model": used_model,
-            "gemini_result": gemini_result
-        }
+        if len(image_data) > config['max_image_size']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size is {config['max_image_size']} bytes"
+            )
+
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
+
+        # Try both classification methods
+        try:
+            # First try with the trained model
+            result = classify_food_dish(image)
+            return result
+        except Exception as model_error:
+            logger.warning(f"Model classification failed: {str(model_error)}")
+            # Fallback to Gemini
+            gemini_result = classify_dish_with_gemini(image)
+            return FoodClassificationResponse(
+                dish_name=gemini_result.get('dish_name', 'unknown'),
+                confidence=gemini_confidence_to_float(gemini_result.get('confidence', 'low')),
+                top_predictions=[{
+                    "dish_name": gemini_result.get('dish_name', 'unknown'),
+                    "confidence": gemini_confidence_to_float(gemini_result.get('confidence', 'low')),
+                    "source": gemini_result.get('source', 'unknown')
+                }]
+            )
+
     except Exception as e:
         logger.error(f"Error in food classification: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
-# Segmentation endpoint
 @app.post("/segment", response_model=SegmentationResponse)
 async def segment_ingredients(file: UploadFile = File(...)):
-    """
-    Segment ingredients in food image using YOLO model and Gemini (if available)
-    """
+    """Segment ingredients from the uploaded food image"""
     try:
-        # Validate file
+        # Read and validate image
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
 
-        # Read and preprocess image
+        # Check file size
         image_data = await file.read()
-        image = Image.open(io.BytesIO(image_data))
-        image_np = np.array(image)
+        if len(image_data) > config['max_image_size']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size is {config['max_image_size']} bytes"
+            )
 
-        # Run YOLO segmentation
-        results = segmentation_model(image_np, verbose=False)
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
 
-        # Process results
-        ingredients_detected = []
-        ingredient_confidences = []
-        if len(results) > 0 and results[0].masks is not None:
-            masks = results[0].masks.data.cpu().numpy()
-            boxes = results[0].boxes.data.cpu().numpy()
-            for i, (mask, box) in enumerate(zip(masks, boxes)):
-                class_id = int(box[5])
-                confidence = float(box[4])
-                if class_id < len(segmentation_class_names):
-                    ingredient_name = segmentation_class_names[class_id]
-                    if ingredient_name == "background":
-                        continue  # Skip background class
-                    if confidence >= config['segmentation_threshold']:
-                        ingredients_detected.append(ingredient_name)
-                        ingredient_confidences.append({ingredient_name: confidence})
+        # Process segmentation with lazy loading
+        try:
+            # Run YOLO segmentation
+            results = load_segmentation_model()(np.array(image), verbose=False)
 
-        # Always call Gemini for ingredient analysis if available
-        gemini_result = None
-        if gemini_model:
-            try:
+            # Process results
+            ingredients_detected = []
+            ingredient_confidences = []
+
+            if results and len(results) > 0:
+                result = results[0]
+                if result.boxes is not None:
+                    for box in result.boxes:
+                        if box.conf is not None and box.cls is not None:
+                            confidence = float(box.conf[0])
+                            class_id = int(box.cls[0])
+
+                            # Get class name from the model
+                            class_name = result.names[class_id] if class_id in result.names else f"class_{class_id}"
+
+                            # Filter out background class
+                            if class_name.lower() != "background":
+                                ingredients_detected.append(class_name)
+                                ingredient_confidences.append({class_name: confidence})
+
+            # If YOLO didn't detect anything, try Gemini
+            if not ingredients_detected:
+                logger.info("No ingredients detected by YOLO, trying Gemini...")
                 gemini_result = analyze_ingredients_with_gemini(image)
-            except Exception as e:
-                logger.warning(f"Gemini analysis failed: {str(e)}")
+                if gemini_result.get('ingredients'):
+                    ingredients_detected = gemini_result['ingredients']
+                    ingredient_confidences = [{"gemini_detected": 0.7} for _ in ingredients_detected]
 
-        # --- Combine YOLO & Gemini detected ingredients for nutrition lookup ---
-        yolo_ingredients = set([i for i in ingredients_detected if i.lower() != "background"])
-        gemini_ingredients = set()
-        if gemini_result and "ingredients" in gemini_result:
-            for i in gemini_result["ingredients"]:
-                if isinstance(i, dict) and "name" in i:
-                    name = i["name"]
-                else:
-                    name = str(i)
-                if name.lower() != "background":
-                    gemini_ingredients.add(name)
+            # Get nutrition data
+            nutrition_data = None
+            health_analysis = None
+            if ingredients_detected:
+                nutrition_data = analyze_nutrition(ingredients_detected)
+                if nutrition_data.get('total_nutrition'):
+                    health_analysis = calculate_health_metrics(nutrition_data['total_nutrition'])
 
-        all_ingredients = sorted(yolo_ingredients.union(gemini_ingredients))
+            # Combine YOLO and Gemini results
+            combined_analysis = combine_ingredient_results(
+                ingredients_detected,
+                ingredient_confidences,
+                analyze_ingredients_with_gemini(image)
+            )
 
-        # Lookup nutrtion for All unique ingredients
-        nutrition_data = None
-        if all_ingredients:
-            ingredients_nutrition = []
-            for ingredient in all_ingredients:
-                nutrition = get_nutrition_data(ingredient)
-                ingredients_nutrition.append(nutrition)
-            total_nutrition = calculate_total_nutrition(ingredients_nutrition)
-            nutrition_data = {
-                "ingredients_nutrition": ingredients_nutrition,
-                "total_nutrition": total_nutrition,
-                "used_ingredients": all_ingredients,
-            }
+            return SegmentationResponse(
+                ingredients_detected=ingredients_detected,
+                ingredient_confidences=ingredient_confidences,
+                combined_analysis=combined_analysis,
+                nutrition_data=nutrition_data,
+                health_analysis=health_analysis
+            )
 
-        # Create combined analysis with both YOLO and Gemini ingredients
-        combined_analysis = combine_ingredient_results(ingredients_detected, ingredient_confidences, gemini_result)
+        except Exception as seg_error:
+            logger.error(f"Segmentation error: {str(seg_error)}")
+            # Fallback to Gemini only
+            gemini_result = analyze_ingredients_with_gemini(image)
+            ingredients_detected = gemini_result.get('ingredients', [])
+            ingredient_confidences = [{"gemini_detected": 0.7} for _ in ingredients_detected]
 
-        # Calculate health metrics
-        health_analysis = calculate_health_metrics(nutrition_data) if nutrition_data else None
+            nutrition_data = None
+            health_analysis = None
+            if ingredients_detected:
+                nutrition_data = analyze_nutrition(ingredients_detected)
+                if nutrition_data.get('total_nutrition'):
+                    health_analysis = calculate_health_metrics(nutrition_data['total_nutrition'])
 
-        return SegmentationResponse(
-            ingredients_detected=ingredients_detected,
-            ingredient_confidences=ingredient_confidences,
-            combined_analysis=combined_analysis,
-            nutrition_data=nutrition_data,
-            health_analysis=health_analysis
-        )
+            return SegmentationResponse(
+                ingredients_detected=ingredients_detected,
+                ingredient_confidences=ingredient_confidences,
+                combined_analysis=gemini_result,
+                nutrition_data=nutrition_data,
+                health_analysis=health_analysis
+            )
 
     except Exception as e:
-        logger.error(f"Error in segmentation: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
+        logger.error(f"Error in ingredient segmentation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
-# Nutrition analysis endpoint
 @app.post("/nutrition")
 async def analyze_nutrition_endpoint(ingredients: List[str]):
-    """
-    Analyze nutrition for a list of ingredients
-    """
+    """Analyze nutrition for a list of ingredients"""
     try:
-        if not ingredients:
-            raise HTTPException(status_code=400, detail="No ingredients provided")
-
-        nutrition_result = analyze_nutrition(ingredients)
-
-        return {
-            "ingredients": ingredients,
-            "nutrition_analysis": nutrition_result
-        }
-
+        nutrition_data = analyze_nutrition(ingredients)
+        return nutrition_data
     except Exception as e:
         logger.error(f"Error in nutrition analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Nutrition analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing nutrition: {str(e)}")
 
-# Combined endpoint for all predictions
 @app.post("/analyze", response_model=CombinedResponse)
 async def analyze_food(file: UploadFile = File(...)):
-    """
-    Complete food analysis: detection, classification, segmentation, and nutrition
-    """
+    """Complete food analysis: detection, classification, and segmentation"""
     try:
-        # Validate file
+        # Read and validate image
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
 
-        # Read image once
+        # Check file size
         image_data = await file.read()
-        image = Image.open(io.BytesIO(image_data))
-        image_np = np.array(image)
+        if len(image_data) > config['max_image_size']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size is {config['max_image_size']} bytes"
+            )
 
-        # 1. Food/Non-food detection
-        food_detection_result = detect_food_nonfood(image)
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
 
-        # Initialize responses
-        food_classification_result = None
-        segmentation_result = None
+        # 1. Food detection
+        detection_result = detect_food_nonfood(image)
+        food_detection = FoodDetectionResponse(
+            is_food=detection_result['is_food'],
+            confidence=detection_result['confidence']
+        )
 
-        # Only proceed with detailed analysis if food is detected
-        if food_detection_result.is_food:
-            # 2. Food classification with Gemini fallback
+        # 2. Food classification (only if food is detected)
+        food_classification = None
+        if detection_result['is_food']:
             try:
-                food_classification_result = classify_food_dish(image)
-                # If confidence is below threshold, use Gemini for dish name
-                if food_classification_result.confidence < FOOD_CLASSIFICATION_CONFIDENCE_THRESHOLD and gemini_model:
-                    try:
-                        gemini_result = classify_dish_with_gemini(image)
-                        food_classification_result = FoodClassificationResponse(
-                            dish_name=gemini_result.get("dish_name", "unknown"),
-                            confidence=gemini_confidence_to_float(gemini_result.get("confidence")),
-                            top_predictions=[]
-                        )
-                    except Exception as e:
-                        logger.warning(f"Gemini dish classification failed: {str(e)}")
+                food_classification = classify_food_dish(image)
             except Exception as e:
                 logger.warning(f"Food classification failed: {str(e)}")
+                # Fallback to Gemini
+                gemini_result = classify_dish_with_gemini(image)
+                food_classification = FoodClassificationResponse(
+                    dish_name=gemini_result.get('dish_name', 'unknown'),
+                    confidence=gemini_confidence_to_float(gemini_result.get('confidence', 'low')),
+                    top_predictions=[{
+                        "dish_name": gemini_result.get('dish_name', 'unknown'),
+                        "confidence": gemini_confidence_to_float(gemini_result.get('confidence', 'low')),
+                        "source": gemini_result.get('source', 'unknown')
+                    }]
+                )
 
-            # 3. Ingredient segmentation (using same logic as /segment endpoint)
+        # 3. Ingredient segmentation (only if food is detected)
+        segmentation = None
+        if detection_result['is_food']:
             try:
                 # Run YOLO segmentation
-                results = segmentation_model(image_np, verbose=False)
+                results = load_segmentation_model()(np.array(image), verbose=False)
+
                 ingredients_detected = []
                 ingredient_confidences = []
 
-                if len(results) > 0 and results[0].masks is not None:
-                    masks = results[0].masks.data.cpu().numpy()
-                    boxes = results[0].boxes.data.cpu().numpy()
-                    for i, (mask, box) in enumerate(zip(masks, boxes)):
-                        class_id = int(box[5])
-                        confidence = float(box[4])
-                        if class_id < len(segmentation_class_names):
-                            ingredient_name = segmentation_class_names[class_id]
-                            if ingredient_name == "background":
-                                continue  # Skip background class
-                            if confidence >= config['segmentation_threshold']:
-                                ingredients_detected.append(ingredient_name)
-                                ingredient_confidences.append({ingredient_name: confidence})
+                if results and len(results) > 0:
+                    result = results[0]
+                    if result.boxes is not None:
+                        for box in result.boxes:
+                            if box.conf is not None and box.cls is not None:
+                                confidence = float(box.conf[0])
+                                class_id = int(box.cls[0])
 
-                # Always call Gemini for ingredient analysis if available
-                gemini_result = None
-                if gemini_model:
-                    try:
-                        gemini_result = analyze_ingredients_with_gemini(image)
-                    except Exception as e:
-                        logger.warning(f"Gemini analysis failed: {str(e)}")
+                                # Get class name from the model
+                                class_name = result.names[class_id] if class_id in result.names else f"class_{class_id}"
 
-                # --- Combine YOLO & Gemini detected ingredients for nutrition lookup ---
-                yolo_ingredients = set([i for i in ingredients_detected if i.lower() != "background"])
-                gemini_ingredients = set()
-                if gemini_result and "ingredients" in gemini_result:
-                    for i in gemini_result["ingredients"]:
-                        if isinstance(i, dict) and "name" in i:
-                            name = i["name"]
-                        else:
-                            name = str(i)
-                        if name.lower() != "background":
-                            gemini_ingredients.add(name)
+                                # Filter out background class
+                                if class_name.lower() != "background":
+                                    ingredients_detected.append(class_name)
+                                    ingredient_confidences.append({class_name: confidence})
 
-                all_ingredients = sorted(yolo_ingredients.union(gemini_ingredients))
+                # If YOLO didn't detect anything, try Gemini
+                if not ingredients_detected:
+                    logger.info("No ingredients detected by YOLO, trying Gemini...")
+                    gemini_result = analyze_ingredients_with_gemini(image)
+                    if gemini_result.get('ingredients'):
+                        ingredients_detected = gemini_result['ingredients']
+                        ingredient_confidences = [{"gemini_detected": 0.7} for _ in ingredients_detected]
 
-                # Lookup nutrition for all unique ingredients
+                # Get nutrition data
                 nutrition_data = None
-                if all_ingredients:
-                    ingredients_nutrition = []
-                    for ingredient in all_ingredients:
-                        nutrition = get_nutrition_data(ingredient)
-                        ingredients_nutrition.append(nutrition)
-                    total_nutrition = calculate_total_nutrition(ingredients_nutrition)
-                    nutrition_data = {
-                        "ingredients_nutrition": ingredients_nutrition,
-                        "total_nutrition": total_nutrition,
-                        "used_ingredients": all_ingredients,
-                    }
+                health_analysis = None
+                if ingredients_detected:
+                    nutrition_data = analyze_nutrition(ingredients_detected)
+                    if nutrition_data.get('total_nutrition'):
+                        health_analysis = calculate_health_metrics(nutrition_data['total_nutrition'])
 
-                # Create combined analysis with both YOLO and Gemini ingredients
-                combined_analysis = combine_ingredient_results(ingredients_detected, ingredient_confidences, gemini_result)
+                # Combine YOLO and Gemini results
+                combined_analysis = combine_ingredient_results(
+                    ingredients_detected,
+                    ingredient_confidences,
+                    analyze_ingredients_with_gemini(image)
+                )
 
-                # Calculate health metrics
-                health_analysis = calculate_health_metrics(nutrition_data) if nutrition_data else None
-
-                # Create segmentation result
-                segmentation_result = SegmentationResponse(
+                segmentation = SegmentationResponse(
                     ingredients_detected=ingredients_detected,
                     ingredient_confidences=ingredient_confidences,
                     combined_analysis=combined_analysis,
@@ -965,18 +858,90 @@ async def analyze_food(file: UploadFile = File(...)):
                     health_analysis=health_analysis
                 )
 
-            except Exception as e:
-                logger.warning(f"Segmentation failed: {str(e)}")
+            except Exception as seg_error:
+                logger.error(f"Segmentation error: {str(seg_error)}")
+                # Fallback to Gemini only
+                gemini_result = analyze_ingredients_with_gemini(image)
+                ingredients_detected = gemini_result.get('ingredients', [])
+                ingredient_confidences = [{"gemini_detected": 0.7} for _ in ingredients_detected]
+
+                nutrition_data = None
+                health_analysis = None
+                if ingredients_detected:
+                    nutrition_data = analyze_nutrition(ingredients_detected)
+                    if nutrition_data.get('total_nutrition'):
+                        health_analysis = calculate_health_metrics(nutrition_data['total_nutrition'])
+
+                segmentation = SegmentationResponse(
+                    ingredients_detected=ingredients_detected,
+                    ingredient_confidences=ingredient_confidences,
+                    combined_analysis=gemini_result,
+                    nutrition_data=nutrition_data,
+                    health_analysis=health_analysis
+                )
 
         return CombinedResponse(
-            food_detection=food_detection_result,
-            food_classification=food_classification_result,
-            segmentation=segmentation_result
+            food_detection=food_detection,
+            food_classification=food_classification,
+            segmentation=segmentation
         )
 
     except Exception as e:
-        logger.error(f"Error in combined analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        logger.error(f"Error in complete food analysis: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_with_food_ai(request: ChatRequest = Body(...)):
+    """Chat with the food AI about nutrition and health"""
+    try:
+        model = load_gemini_model()
+        if not model:
+            raise HTTPException(status_code=503, detail="Gemini API not available")
+
+        # Build context from request
+        context = "You are a helpful nutrition and food expert. "
+
+        if request.dish_name:
+            context += f"The user is asking about: {request.dish_name}. "
+
+        if request.ingredients:
+            context += f"Ingredients: {', '.join(request.ingredients)}. "
+
+        if request.nutrition:
+            context += f"Nutrition data: {json.dumps(request.nutrition)}. "
+
+        if request.image:
+            # Decode base64 image
+            try:
+                image_data = base64.b64decode(request.image)
+                image = Image.open(io.BytesIO(image_data)).convert('RGB')
+
+                # Convert image to bytes for Gemini
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='PNG')
+                img_byte_arr = img_byte_arr.getvalue()
+
+                # Generate response with image
+                response = model.generate_content([
+                    context + request.question,
+                    {"mime_type": "image/png", "data": img_byte_arr}
+                ])
+            except Exception as img_error:
+                logger.error(f"Error processing image in chat: {str(img_error)}")
+                # Fallback to text-only
+                response = model.generate_content(context + request.question)
+        else:
+            # Text-only response
+            response = model.generate_content(context + request.question)
+
+        return ChatResponse(
+            answer=response.text,
+            gemini_raw={"response": response.text}
+        )
+
+    except Exception as e:
+        logger.error(f"Error in chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
 def analyze_nutrition(ingredients: List[str]) -> Dict[str, Any]:
     """Analyze nutrition for a list of ingredients"""
@@ -1016,231 +981,125 @@ def analyze_nutrition(ingredients: List[str]) -> Dict[str, Any]:
         }
 
 def detect_food_nonfood(image: Image.Image):
-    """Detect if the image contains food using the loaded model and return a FoodDetectionResponse."""
+    """Detect if the image contains food using the loaded model and return a dictionary."""
     processed_image = preprocess_image_for_detection(image)
-    prob = food_nonfood_model.predict(processed_image, verbose=0)[0][0]
+    model = load_food_nonfood_model()
+    prob = model.predict(processed_image, verbose=0)[0][0]
     threshold = config['classification_threshold']
     is_food = prob < threshold  # If prob < threshold, it's FOOD
     confidence = prob if not is_food else (1 - prob)
-    return FoodDetectionResponse(
-        is_food=is_food,
-        confidence=confidence
-    )
+    return {
+        "is_food": is_food,
+        "confidence": confidence
+    }
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_with_food_ai(request: ChatRequest = Body(...)):
-    """
-    Conversational Q&A about the captured food using Gemini Vision Pro.
-    Accepts question, dish_name, ingredients, nutrition, and optionally image (base64).
-    Returns the AI's answer.
-    """
-    if not gemini_model:
-        raise HTTPException(status_code=503, detail="Gemini Vision Pro is not configured.")
+# Pydantic models for responses
+class FoodDetectionResponse(BaseModel):
+    is_food: bool
+    confidence: float
+
+class FoodClassificationResponse(BaseModel):
+    dish_name: str
+    confidence: Optional[float]
+    top_predictions: List[Dict[str, Any]]
+
+class SegmentationResponse(BaseModel):
+    ingredients_detected: List[str]
+    ingredient_confidences: List[Dict[str, float]]  # List of {ingredient: confidence} pairs
+    combined_analysis: Optional[Dict[str, Any]] = None  # Combined YOLO + Gemini results
+    nutrition_data: Optional[Dict[str, Any]] = None  # Nutrition information for ingredients
+    health_analysis: Optional[Dict[str, Any]] = None  # Health metrics and recommendations
+
+class CombinedResponse(BaseModel):
+    food_detection: FoodDetectionResponse
+    food_classification: Optional[FoodClassificationResponse]
+    segmentation: Optional[SegmentationResponse]
+
+class ChatRequest(BaseModel):
+    question: str
+    dish_name: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    nutrition: Optional[Dict[str, Any]] = None
+    image: Optional[str] = None  # base64-encoded image
+
+class ChatResponse(BaseModel):
+    answer: str
+    gemini_raw: Optional[dict] = None
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint - doesn't require model loading"""
     try:
-        # Compose context for Gemini
-        context = ""
-        if request.dish_name:
-            context += f"Dish name: {request.dish_name}\n"
-        if request.ingredients:
-            context += f"Ingredients: {', '.join(request.ingredients)}\n"
-        if request.nutrition:
-            context += f"Nutrition: {json.dumps(request.nutrition)}\n"
-        prompt = f"You are a food and nutrition expert AI. Answer the user's question about the food below.\n{context}\nQuestion: {request.question}"
-        # Prepare image if provided
-        gemini_inputs = [prompt]
-        if request.image:
-            try:
-                image_bytes = base64.b64decode(request.image.split(',')[-1])
-                gemini_inputs.append({"mime_type": "image/jpeg", "data": image_bytes})
-            except Exception as e:
-                logger.warning(f"Failed to decode image for chat: {str(e)}")
-        # Get answer from Gemini
-        response = gemini_model.generate_content(gemini_inputs)
-        answer = response.text.strip()
-        return ChatResponse(answer=answer, gemini_raw=getattr(response, 'result', None))
-    except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
-
-def calculate_health_metrics(nutrition_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Calculate health metrics and recommendations based on nutrition data"""
-    try:
-        total_nutrition = nutrition_data.get("total_nutrition", {})
-
-        # Debug logging to see what we're working with
-        logger.info(f"Total nutrition keys: {list(total_nutrition.keys())}")
-
-        # Daily Value (DV) percentages based on 2000 calorie diet
-        daily_values = {
-            "calories": 2000,
-            "protein": 50,  # grams
-            "total_fat": 65,  # grams
-            "saturated_fat": 20,  # grams
-            "total_carbohydrate": 300,  # grams
-            "dietary_fiber": 25,  # grams
-            "sugars": 50,  # grams
-            "cholesterol": 300,  # mg
-            "sodium": 2300,  # mg
-            "potassium": 3500,  # mg
-            "vitamin_c": 90,  # mg
-            "vitamin_a": 900,  # mcg RAE
-            "calcium": 1300,  # mg
-            "iron": 18  # mg
-        }
-
-        # Calculate DV percentages
-        dv_percentages = {}
-        for nutrient, dv in daily_values.items():
-            # Map nutrient names to actual keys in total_nutrition
-            if nutrient == "calories":
-                key = "total_calories"
-            elif nutrient == "protein":
-                key = "total_protein"
-            elif nutrient == "total_fat":
-                key = "total_fat"
-            elif nutrient == "saturated_fat":
-                key = "total_saturated_fat"
-            elif nutrient == "total_carbohydrate":
-                key = "total_carbohydrate"
-            elif nutrient == "dietary_fiber":
-                key = "total_fiber"
-            elif nutrient == "sugars":
-                key = "total_sugars"
-            elif nutrient == "cholesterol":
-                key = "total_cholesterol"
-            elif nutrient == "sodium":
-                key = "total_sodium"
-            elif nutrient == "potassium":
-                key = "total_potassium"
-            elif nutrient == "vitamin_c":
-                key = "total_vitamin_c"
-            elif nutrient == "vitamin_a":
-                key = "total_vitamin_a"
-            elif nutrient == "calcium":
-                key = "total_calcium"
-            elif nutrient == "iron":
-                key = "total_iron"
-            else:
-                key = f"total_{nutrient}"
-
-            if key in total_nutrition:
-                value = total_nutrition[key]
-                percentage = round((value / dv) * 100, 1)
-                dv_percentages[nutrient] = {
-                    "value": value,
-                    "daily_value": dv,
-                    "percentage": percentage,
-                    "unit": "g" if nutrient in ["protein", "total_fat", "saturated_fat", "total_carbohydrate", "dietary_fiber", "sugars"] else "mg" if nutrient in ["cholesterol", "sodium", "potassium", "vitamin_c", "calcium", "iron"] else "mcg" if nutrient == "vitamin_a" else "kcal"
-                }
-
-        # Calculate macronutrient ratios
-        total_calories = total_nutrition.get("total_calories", 0)
-        if total_calories > 0:
-            protein_cals = total_nutrition.get("total_protein", 0) * 4
-            fat_cals = total_nutrition.get("total_fat", 0) * 9
-            carb_cals = total_nutrition.get("total_carbohydrate", 0) * 4
-
-            macro_ratios = {
-                "protein": round((protein_cals / total_calories) * 100, 1),
-                "fat": round((fat_cals / total_calories) * 100, 1),
-                "carbohydrate": round((carb_cals / total_calories) * 100, 1)
-            }
-        else:
-            macro_ratios = {"protein": 0, "fat": 0, "carbohydrate": 0}
-
-        # Health score calculation (1-10 scale)
-        health_score = 10
-
-        # Deduct points for excessive values
-        if dv_percentages.get("saturated_fat", {}).get("percentage", 0) > 100:
-            health_score -= 2.0
-        if dv_percentages.get("sodium", {}).get("percentage", 0) > 100:
-            health_score -= 2.0
-        if dv_percentages.get("sugars", {}).get("percentage", 0) > 100:
-            health_score -= 2.0
-        if dv_percentages.get("cholesterol", {}).get("percentage", 0) > 100:
-            health_score -= 2.0
-
-        # Add points for good values
-        if dv_percentages.get("dietary_fiber", {}).get("percentage", 0) > 80:
-            health_score += 1.0
-        if dv_percentages.get("protein", {}).get("percentage", 0) > 80:
-            health_score += 0.5
-        if dv_percentages.get("vitamin_c", {}).get("percentage", 0) > 50:
-            health_score += 0.5
-        if dv_percentages.get("calcium", {}).get("percentage", 0) > 50:
-            health_score += 0.5
-
-        health_score = max(1, min(10, round(health_score)))
-
-        # Dietary recommendations
-        recommendations = []
-
-        if dv_percentages.get("saturated_fat", {}).get("percentage", 0) > 100:
-            recommendations.append("High in saturated fat - consider choosing leaner protein sources")
-        if dv_percentages.get("sodium", {}).get("percentage", 0) > 100:
-            recommendations.append("High in sodium - consider reducing salt or choosing lower-sodium options")
-        if dv_percentages.get("sugars", {}).get("percentage", 0) > 100:
-            recommendations.append("High in added sugars - consider natural sweeteners or reducing sugar intake")
-        if dv_percentages.get("dietary_fiber", {}).get("percentage", 0) < 50:
-            recommendations.append("Low in fiber - consider adding more vegetables, fruits, or whole grains")
-        if dv_percentages.get("protein", {}).get("percentage", 0) < 50:
-            recommendations.append("Low in protein - consider adding more protein-rich foods")
-        if dv_percentages.get("vitamin_c", {}).get("percentage", 0) < 30:
-            recommendations.append("Low in vitamin C - consider adding citrus fruits or vegetables")
-        if dv_percentages.get("calcium", {}).get("percentage", 0) < 30:
-            recommendations.append("Low in calcium - consider adding dairy products or calcium-fortified foods")
-
-        if not recommendations:
-            recommendations.append("This meal appears to be well-balanced nutritionally")
-
-        # Meal type classification
-        meal_type = "Unknown"
-        if total_calories < 300:
-            meal_type = "Snack"
-        elif total_calories < 600:
-            meal_type = "Light Meal"
-        elif total_calories < 1000:
-            meal_type = "Regular Meal"
-        else:
-            meal_type = "Heavy Meal"
-
-        # Dietary restrictions check
-        dietary_flags = []
-        if total_nutrition.get("total_cholesterol", 0) > 200:
-            dietary_flags.append("high_cholesterol")
-        if total_nutrition.get("total_sodium", 0) > 1000:
-            dietary_flags.append("high_sodium")
-        if total_nutrition.get("total_saturated_fat", 0) > 10:
-            dietary_flags.append("high_saturated_fat")
-        if total_nutrition.get("total_sugars", 0) > 25:
-            dietary_flags.append("high_sugar")
+        # Check Nutritionix configuration
+        nutritionix_configured = setup_nutritionix()
 
         return {
-            "health_score": health_score,
-            "meal_type": meal_type,
-            "daily_value_percentages": dv_percentages,
-            "macro_ratios": macro_ratios,
-            "recommendations": recommendations,
-            "dietary_flags": dietary_flags,
-            "summary": {
-                "total_calories": round(total_calories, 2),
-                "calorie_density": "High" if total_calories > 500 else "Medium" if total_calories > 300 else "Low",
-                "nutritional_balance": "Good" if health_score > 7 else "Fair" if health_score > 5 else "Poor"
-            }
+            "status": "healthy",
+            "models_loaded": False,  # Models are loaded on-demand now
+            "nutritionix_configured": nutritionix_configured,
+            "gemini_configured": False,  # Will be loaded when needed
+            "lazy_loading": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
         }
 
+# Food detection endpoint
+@app.post("/detect-food", response_model=FoodDetectionResponse)
+async def detect_food(file: UploadFile = File(...)):
+    """Detect if the uploaded image contains food"""
+    try:
+        # Read and validate image
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        # Check file size
+        image_data = await file.read()
+        if len(image_data) > config['max_image_size']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size is {config['max_image_size']} bytes"
+            )
+
+        image = Image.open(io.BytesIO(image_data)).convert('RGB')
+
+        # Use the lazy loading function
+        result = detect_food_nonfood(image)
+
+        return FoodDetectionResponse(
+            is_food=result['is_food'],
+            confidence=result['confidence']
+        )
+
     except Exception as e:
-        logger.error(f"Error calculating health metrics: {str(e)}")
-        return {
-            "health_score": 1,
-            "meal_type": "Unknown",
-            "daily_value_percentages": {},
-            "macro_ratios": {},
-            "recommendations": [f"Unable to calculate health metrics: {str(e)}"],
-            "dietary_flags": [],
-            "summary": {}
-        }
+        logger.error(f"Error in food detection: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+# Simple startup event - no model loading
+@app.on_event("startup")
+async def startup_event():
+    """Startup event - only setup basic configuration"""
+    setup_nutritionix()
+    logger.info("FastAPI app started with lazy loading enabled")
+
+@app.get("/model-status")
+async def model_status():
+    """Check which models are currently loaded in memory"""
+    return {
+        "food_nonfood_model": food_nonfood_model is not None,
+        "food_classifier_model": food_classifier_model is not None,
+        "segmentation_model": segmentation_model is not None,
+        "food_labels": food_labels is not None,
+        "gemini_model": gemini_model is not None,
+        "lazy_loading": True,
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
