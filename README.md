@@ -57,7 +57,7 @@ SEGMENTATION_CONFIDENCE_THRESHOLD=0.5
 MAX_IMAGE_SIZE=10485760  # 10MB
 
 # Google Gemini API (optional)
-GEMINI_API_KEY=your_gemini_api_key_here
+GOOGLE_API_KEY=your_gemini_api_key_here
 
 # Nutritionix API (required for nutrition features)
 NUTRITIONIX_APP_ID=your_nutritionix_app_id_here
@@ -116,50 +116,63 @@ Run the test script to verify all endpoints:
 python test_api.py
 ```
 
-## Docker Deployment
-
-### Build the Docker image:
-```bash
-docker build -t food-ai-scanner-api .
-```
-
-### Run the container:
-```bash
-docker run -p 8000:8000 food-ai-scanner-api
-```
-
 ## Render Deployment
+
+### Why Render?
+- **Free forever**: 750 hours/month (enough for 24/7 deployment)
+- **Easy setup**: Automatic deployments from GitHub
+- **No credit card required**: For free tier
+- **Custom domains**: Free SSL certificates
+- **Sleep behavior**: Goes to sleep after 15 minutes of inactivity, wakes up on request
 
 ### 1. Prepare for Render
 
 1. **Create a Render account** at [render.com](https://render.com)
+2. **Push your code** to GitHub repository
+3. **Connect your repository** to Render
 
-2. **Connect your repository** to Render
+### 2. Create Web Service
 
-3. **Create a new Web Service**:
-   - **Name**: `food-ai-scanner-api`
-   - **Environment**: `Docker`
-   - **Region**: Choose closest to your users
-   - **Branch**: `main` (or your default branch)
+1. **Click "New +" → "Web Service"**
+2. **Select your repository**
+3. **Configure the service**:
+   - **Name**: `food-ai-api` (or your preferred name)
+   - **Environment**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+   - **Plan**: Free
 
-### 2. Configure Environment Variables
+### 3. Set Environment Variables
 
-In Render dashboard, add these environment variables:
-```
-PYTHON_VERSION=3.9
-PORT=8000
-```
-
-### 3. Build Configuration
-
-Render will automatically detect the Dockerfile and build the service.
+In your Render service dashboard, go to "Environment" tab and add:
+- **Key**: `GOOGLE_API_KEY`
+- **Value**: Your Google API key for Gemini Vision AI
 
 ### 4. Deploy
 
-Click "Create Web Service" and Render will:
-1. Build your Docker image
-2. Deploy it to their infrastructure
-3. Provide you with a public URL
+Click "Create Web Service" and wait for deployment (5-10 minutes).
+
+### Important Notes
+
+- **Model Files**: Your model files (~1.05 GB) will be uploaded during deployment
+- **Sleep Behavior**: Free tier sleeps after 15 minutes, first request may take 30-60 seconds
+- **Memory**: Free tier has 512MB RAM limit
+- **Upgrade**: $7/month for always-on service
+
+### Testing Your Deployment
+
+Once deployed, test your endpoints:
+```bash
+# Health check
+curl https://your-app-name.onrender.com/health
+
+# Test food analysis
+curl -X POST https://your-app-name.onrender.com/analyze \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@your_food_image.jpg"
+```
+
+For detailed deployment instructions, see [DEPLOYMENT_RENDER.md](DEPLOYMENT_RENDER.md).
 
 ## API Usage Examples
 
@@ -167,12 +180,12 @@ Click "Create Web Service" and Render will:
 
 **Health Check**:
 ```bash
-curl http://your-render-url/health
+curl https://your-app-name.onrender.com/health
 ```
 
 **Food Detection**:
 ```bash
-curl -X POST "http://your-render-url/detect-food" \
+curl -X POST "https://your-app-name.onrender.com/detect-food" \
      -H "accept: application/json" \
      -H "Content-Type: multipart/form-data" \
      -F "file=@your_image.jpg"
@@ -180,7 +193,7 @@ curl -X POST "http://your-render-url/detect-food" \
 
 **Complete Analysis**:
 ```bash
-curl -X POST "http://your-render-url/analyze" \
+curl -X POST "https://your-app-name.onrender.com/analyze" \
      -H "accept: application/json" \
      -H "Content-Type: multipart/form-data" \
      -F "file=@your_image.jpg"
@@ -196,7 +209,7 @@ async function analyzeFood(imagePath) {
     const form = new FormData();
     form.append('file', fs.createReadStream(imagePath));
 
-    const response = await fetch('http://your-render-url/analyze', {
+    const response = await fetch('https://your-app-name.onrender.com/analyze', {
         method: 'POST',
         body: form
     });
@@ -227,7 +240,7 @@ def analyze_food(image_path, api_url):
         return response.json()
 
 # Usage
-result = analyze_food('food-image.jpg', 'http://your-render-url')
+result = analyze_food('food-image.jpg', 'https://your-app-name.onrender.com')
 print(f"Food detected: {result['food_detection']['is_food']}")
 print(f"Dish: {result['food_classification']['dish_name']}")
 ```
@@ -266,14 +279,14 @@ The API provides comprehensive nutrition analysis for detected ingredients using
 
 **Individual Ingredient Nutrition:**
 ```bash
-curl -X POST "http://your-render-url/nutrition" \
+curl -X POST "https://your-app-name.onrender.com/nutrition" \
      -H "Content-Type: application/json" \
      -d '["apple", "banana", "orange"]'
 ```
 
 **Complete Analysis with Nutrition:**
 ```bash
-curl -X POST "http://your-render-url/analyze" \
+curl -X POST "https://your-app-name.onrender.com/analyze" \
      -H "Content-Type: multipart/form-data" \
      -F "file=@food_image.jpg"
 ```

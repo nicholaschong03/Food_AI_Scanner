@@ -1,7 +1,8 @@
-# Environment variables
-.env
-.env.local
-.env.production
+# Virtual environment
+foodAIenv/
+venv/
+env/
+.venv/
 
 # Python
 __pycache__/
@@ -25,16 +26,17 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
-venv/
-env/
-ENV/
+# Environment variables
+.env
+.env.local
+.env.production
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
@@ -42,8 +44,18 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
-# Model files (if you want to exclude them from git)
+# Temporary files
+*.tmp
+*.temp
+flagged/
+
+# Model files (if you want to exclude them - but we need them for deployment)
 # models/*.h5
 # models/*.pt
 # models/*.json
+
+# Test files
+test_*.py
+*_test.py
